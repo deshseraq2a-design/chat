@@ -127,7 +127,9 @@ create policy "Users manage their reactions" on public.message_reactions for all
 create policy "Users manage their own blocks" on public.blocks for all to authenticated using (blocker_id = auth.uid()) with check (blocker_id = auth.uid());
 create policy "Users create reports" on public.reports for insert to authenticated with check (reporter_id = auth.uid());
 
-create or replace view public.public_messages as
+create or replace view public.public_messages
+with (security_invoker = false)
+as
 select
   m.id, m.group_id, ai.display_name as anonymous_display_name, ai.avatar as anonymous_avatar,
   m.type, case when m.type = 'text' then m.text else null end as text,
@@ -145,8 +147,7 @@ where m.deleted_at is null
   and (g.is_public or exists (
     select 1 from public.group_members gm
     where gm.group_id = m.group_id and gm.user_id = auth.uid()
-  ))
-with (security_invoker = false);
+  ));
 
 grant select on public.public_messages to authenticated;
 
