@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
+import { fetchGroupMessages, fetchPublicGroups, subscribeToGroupMessages, type DatabaseGroup, type DatabaseMessage } from './lib/database'
+import { isSupabaseConfigured } from './lib/supabase'
 
 type Section = 'home' | 'discover' | 'groups' | 'notifications' | 'settings'
 type MessageKind = 'text' | 'gif' | 'sticker'
@@ -59,6 +61,34 @@ const emojiSet = ['😊', '😂', '🥹', '😍', '🤔', '🙌', '🔥', '💡'
 const gifs = ['https://media.giphy.com/media/26uf9MHun4C7HAB20/giphy.gif', 'https://media.giphy.com/media/111ebonMs90YLu/giphy.gif', 'https://media.giphy.com/media/3o7TKt5Yl2s1D5G6yY/giphy.gif']
 const stickers = ['🌈', '🍀', '✨', '🫶', '🌻', '🐸', '🚀', '🍜']
 
+function mapGroup(group: DatabaseGroup): Group {
+  return {
+    id: group.id,
+    name: group.name,
+    icon: group.icon,
+    description: group.description,
+    category: group.category,
+    language: group.language,
+    region: group.region,
+    members: group.member_count,
+    online: group.online_count,
+    accent: 'blue',
+  }
+}
+
+function mapMessage(message: DatabaseMessage): Message {
+  return {
+    id: Number.parseInt(message.id.replace(/-/g, '').slice(0, 12), 16),
+    author: message.anonymous_display_name,
+    avatar: message.anonymous_avatar,
+    time: new Date(message.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+    body: message.text ?? undefined,
+    kind: message.type,
+    media: message.gif_url ?? message.sticker_id ?? undefined,
+    reactions: message.reactions ?? {},
+  }
+}
+
 function formatMembers(value: number) {
   return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 1)}k` : value.toString()
 }
@@ -94,8 +124,45 @@ function App() {
   const [showMobileInfo, setShowMobileInfo] = useState(false)
   const [notice, setNotice] = useState('')
   const [isJoined, setIsJoined] = useState(true)
-  const activeGroup = groups.find((group) => group.id === activeGroupId) ?? groups[0]
+  const [liveGroups, setLiveGroups] = useState<Group[]>(groups)
+  const [liveError, setLiveError] = useState('')
+  const activeGroup = liveGroups.find((group) => group.id === activeGroupId) ?? liveGroups[0]
   const activeMessages = messages[activeGroupId] ?? []
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return
+    let cancelled = false
+    void fetchPublicGroups()
+      .then((data) => {
+        if (cancelled) return
+        const nextGroups = data.map(mapGroup)
+        setLiveGroups(nextGroups)
+        if (nextGroups.length > 0) {
+          setActiveGroupId((current) => nextGroups.some((group) => group.id === current) ? current : nextGroups[0].id)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setLiveError(error instanceof Error ? error.message : 'Unable to load groups from Supabase.')
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !activeGroup) return
+    let cancelled = false
+    const refreshMessages = () => {
+      void fetchGroupMessages(activeGroup.id)
+        .then((data) => {
+          if (!cancelled) setMessages((current) => ({ ...current, [activeGroup.id]: data.map(mapMessage) }))
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setLiveError(error instanceof Error ? error.message : 'Unable to load messages from Supabase.')
+        })
+    }
+    refreshMessages()
+    const unsubscribe = subscribeToGroupMessages(activeGroup.id, refreshMessages)
+    return () => { cancelled = true; unsubscribe() }
+  }, [activeGroup?.id])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -108,7 +175,7 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  const filteredGroups = useMemo(() => groups.filter((group) => `${group.name} ${group.description} ${group.category}`.toLowerCase().includes(query.toLowerCase())), [query])
+  const filteredGroups = useMemo(() => liveGroups.filter((group) => `${group.name} ${group.description} ${group.category}`.toLowerCase().includes(query.toLowerCase())), [liveGroups, query])
 
   function openGroup(group: Group) {
     setActiveGroupId(group.id)
@@ -120,6 +187,10 @@ function App() {
   function sendMessage(kind: MessageKind = 'text', body = draft, media?: string) {
     if (!isJoined) {
       setNotice('Join this group to start chatting.')
+      return
+    }
+    if (isSupabaseConfigured) {
+      setNotice('Sign in and choose an anonymous identity before sending messages.')
       return
     }
     if (kind === 'text' && !body.trim()) return
@@ -179,9 +250,10 @@ function App() {
           <div className="top-actions"><div className="search-box"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search groups" /></div><button className="icon-button notification-button" onClick={() => setSection('notifications')}><Icon name="bell" /><i>3</i></button><button className="avatar avatar-coral mobile-avatar" onClick={() => setSection('settings')}>A</button></div>
         </header>
 
-        {section === 'home' && <ChatView activeGroup={activeGroup} activeMessages={activeMessages} isJoined={isJoined} draft={draft} setDraft={setDraft} panel={panel} setPanel={setPanel} sendMessage={sendMessage} addReaction={addReaction} onToggleJoin={toggleJoin} onToggleInfo={() => setShowMobileInfo((value) => !value)} />}
+        {liveError && <div className="live-error" role="alert">Live database error: {liveError}</div>}
+        {section === 'home' && activeGroup && <ChatView activeGroup={activeGroup} activeMessages={activeMessages} isJoined={isJoined} draft={draft} setDraft={setDraft} panel={panel} setPanel={setPanel} sendMessage={sendMessage} addReaction={addReaction} onToggleJoin={toggleJoin} onToggleInfo={() => setShowMobileInfo((value) => !value)} />}
         {section === 'discover' && <DiscoverView groups={filteredGroups} query={query} setQuery={setQuery} onOpen={openGroup} />}
-        {section === 'groups' && <MyGroupsView groups={groups.filter((group) => group.joined)} onOpen={openGroup} onDiscover={() => setSection('discover')} />}
+          {section === 'groups' && <MyGroupsView groups={liveGroups.filter((group) => group.joined)} onOpen={openGroup} onDiscover={() => setSection('discover')} />}
         {section === 'notifications' && <NotificationsView />}
         {section === 'settings' && <SettingsView theme={theme} setTheme={setTheme} />}
       </main>

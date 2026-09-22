@@ -149,7 +149,7 @@ where m.deleted_at is null
     where gm.group_id = m.group_id and gm.user_id = auth.uid()
   ));
 
-grant select on public.public_messages to authenticated;
+grant select on public.public_messages to anon, authenticated;
 
 alter publication supabase_realtime add table public.messages;
 alter publication supabase_realtime add table public.message_reactions;
